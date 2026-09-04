@@ -1,0 +1,13 @@
+#!ipxe
+# Copy to netboot/boot-ai.ipxe and adapt. {{BASE}} is replaced at runtime with
+# WAKER_NETBOOT_BASE_URL, so the kernel and initrd are fetched over HTTP from
+# this server. Everything in this directory is served under /netboot/.
+#
+# NixOS: `nix build .#netboot` produces bzImage, initrd and a netboot.ipxe
+# whose "init=" path changes with every rebuild. Copy that line over verbatim.
+
+echo Waker: booting AI image
+
+kernel {{BASE}}/bzImage init=/nix/store/REPLACE-ME-nixos-system/init loglevel=4 nvidia_drm.modeset=1
+initrd {{BASE}}/initrd
+boot

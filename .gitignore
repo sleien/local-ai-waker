@@ -1,0 +1,6 @@
+/data/
+/tftp/
+/netboot/*
+!/netboot/README.md
+!/netboot/boot-ai.ipxe.example
+.env
