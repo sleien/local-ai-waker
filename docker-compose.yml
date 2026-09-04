@@ -8,12 +8,17 @@ services:
     volumes:
       - ./data:/data
       - ./netboot:/netboot:ro
-    ports:
-      # LAN port: iPXE fetches /boot.ipxe and /netboot/* here, and local
-      # clients can hit Ollama directly without going through Traefik.
-      - "${WAKER_LAN_PORT:-8080}:8080"
     networks:
       - proxy
+    # No published ports on purpose. Everything from outside comes through
+    # Traefik, everything from inside (Homepage, other containers) reaches the
+    # service by name: http://ai-waker:8080 and http://ai-waker:8081.
+    #
+    # Only publish a port if you do NOT want to give Traefik a plain-HTTP
+    # entrypoint for netboot (see the netboot router below and the README).
+    # Bind it to the LAN address, not to 0.0.0.0:
+    #ports:
+    #  - "${WAKER_SERVER_IP}:${WAKER_LAN_PORT:-8080}:8080"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/healthz"]
       interval: 30s
@@ -26,12 +31,27 @@ services:
 
       # --- AI endpoint: ai.$DOMAIN -> Ollama on the workstation -------------
       # Guarded by WAKER_API_KEY inside the app, no Authentik: API clients
-      # cannot do an interactive login flow.
-      - "traefik.http.routers.ai-waker.rule=Host(`ai.${DOMAIN}`)"
+      # cannot do an interactive login flow. The rule is limited to the API
+      # paths so the boot script and the kernel images are never served here.
+      - "traefik.http.routers.ai-waker.rule=Host(`ai.${DOMAIN}`) && (PathPrefix(`/api`) || PathPrefix(`/v1`))"
       - "traefik.http.routers.ai-waker.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
       - "traefik.http.routers.ai-waker.tls.certresolver=${TRAEFIK_CERTRESOLVER:-le}"
       - "traefik.http.routers.ai-waker.service=ai-waker"
       - "traefik.http.services.ai-waker.loadbalancer.server.port=8080"
+
+      # --- Netboot: plain HTTP, no auth, LAN only --------------------------
+      # iPXE firmware has no TLS and no login, so this needs an entrypoint
+      # without the HTTPS redirect. Add to the static Traefik config:
+      #
+      #   entryPoints:
+      #     netboot:
+      #       address: ":8080"
+      #
+      # and publish 8080 on the Traefik container, bound to the LAN address.
+      # No Host rule: the firmware addresses the server by IP.
+      - "traefik.http.routers.ai-waker-netboot.rule=Path(`/boot.ipxe`) || PathPrefix(`/netboot/`)"
+      - "traefik.http.routers.ai-waker-netboot.entrypoints=${TRAEFIK_NETBOOT_ENTRYPOINT:-netboot}"
+      - "traefik.http.routers.ai-waker-netboot.service=ai-waker"
 
       # --- Admin UI: waker.$DOMAIN, behind Authentik -----------------------
       - "traefik.http.routers.ai-waker-admin.rule=Host(`waker.${DOMAIN}`)"

@@ -20,22 +20,51 @@ nicht dieser Dienst.
 
 ## Endpunkte
 
-Zwei Listener, damit die Steuerung nicht am LAN-Port hängt.
+Zwei Listener im Container, **keine** veröffentlichten Ports. Alles von aussen
+kommt über Traefik, alles von innen über den Containernamen.
 
-| Listener | Port | Endpunkt | Zweck |
+| Port | Endpunkt | Erreichbar über | Auth |
 |---|---|---|---|
-| LAN | 8080 | `/boot.ipxe` | iPXE-Skript je nach Modus, ohne Auth (Firmware kann kein TLS) |
-| LAN | 8080 | `/netboot/*` | Kernel und initrd |
-| LAN | 8080 | alles andere | Reverse Proxy auf Ollama, weckt bei Bedarf |
-| LAN | 8080 | `/healthz` | Liveness |
-| Admin | 8081 | `/` | kleine Weboberfläche mit den Start-Buttons |
-| Admin | 8081 | `/status` | JSON für Homepage |
-| Admin | 8081 | `/mode` | GET liest, POST setzt `ai` oder `work` |
-| Admin | 8081 | `/wake` | POST: Modus setzen und Magic Packet senden |
+| 8080 | `/api/*`, `/v1/*` | `https://ai.$DOMAIN` | `WAKER_API_KEY` |
+| 8080 | `/boot.ipxe`, `/netboot/*` | Traefik-Entrypoint `netboot`, Klartext-HTTP | keine, LAN only |
+| 8080 | `/healthz` | intern | keine |
+| 8081 | `/` | `https://waker.$DOMAIN` | Authentik |
+| 8081 | `/status` | intern, z. B. `http://ai-waker:8081/status` | optional Token |
+| 8081 | `/mode`, `/wake` | wie oben | wie oben |
 
-Port 8081 wird bewusst **nicht** im Compose veröffentlicht. Erreichbar ist er
-über Traefik (mit Authentik davor) und über das Docker-Netz, etwa für
-Homepage.
+## Warum ein Klartext-Port, wenn Traefik da ist
+
+Für den AI-Pfad braucht es keinen: Clients gehen über `https://ai.$DOMAIN`,
+Container im selben Netz über `http://ai-waker:8080`. Der offene Port existiert
+allein für iPXE. Die Firmware kann kein TLS, folgt keinem 301 auf HTTPS und
+soll beim Booten nicht von DNS abhängen, holt das Skript also unter
+`http://192.168.1.10:8080/boot.ipxe`.
+
+Drei Wege, das zu lösen, in dieser Reihenfolge:
+
+1. **Eigener Traefik-Entrypoint** (so eingerichtet). In die statische Konfiguration:
+
+   ```yaml
+   entryPoints:
+     netboot:
+       address: ":8080"
+   ```
+
+   Am Traefik-Container `192.168.1.10:8080:8080` veröffentlichen, also an die
+   LAN-Adresse gebunden statt an `0.0.0.0`. Ein Ingress, ein Logfile, und die
+   Regel des Netboot-Routers deckt nur `/boot.ipxe` und `/netboot/` ab.
+2. **Über den bestehenden `web`-Entrypoint**, falls dein HTTPS-Redirect als
+   Router-Middleware hängt und nicht am Entrypoint. Dann kommt gar kein neuer
+   Port dazu: Netboot-Router auf `web`, ohne die Redirect-Middleware. Bei
+   `entryPoints.web.http.redirections` geht das nicht, das gilt für alle Router
+   des Entrypoints.
+3. **Port am Waker-Container** veröffentlichen. Der auskommentierte
+   `ports`-Block in `docker-compose.yml` bindet ihn an `WAKER_SERVER_IP`.
+   Nachteil: umgeht Traefik, und `/api/*` wäre dort nur durch
+   `WAKER_API_KEY` geschützt.
+
+Ohne Netboot, also solange du beim aktuellen Bootloader bleibst, braucht keine
+der drei Varianten einen Port.
 
 ## Setup
 
@@ -45,10 +74,10 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Test ohne Netboot, nur Wecken und Weiterleiten:
+Test ohne Netboot, nur Wecken und Weiterleiten, direkt im Container:
 
 ```bash
-curl -X POST "http://localhost:8080/api/generate" -d '{"model":"llama3.1","prompt":"hi"}'
+docker compose exec ai-waker wget -qO- --post-data '{"model":"llama3.1","prompt":"hi"}' http://127.0.0.1:8080/api/generate
 ```
 
 Der erste Aufruf blockiert, bis die Workstation antwortet (Boot plus Laden des
@@ -100,7 +129,9 @@ durchgereicht werden statt gepuffert.
 
 **Auth.** `ai.$DOMAIN` läuft ohne Authentik, weil API-Clients keinen
 Browser-Login machen können; stattdessen `WAKER_API_KEY` setzen und als
-`Authorization: Bearer ...` oder `X-Api-Key` mitschicken. `waker.$DOMAIN`
+`Authorization: Bearer ...` oder `X-Api-Key` mitschicken. Die Router-Regel
+dort deckt nur `/api` und `/v1` ab, das Boot-Skript ist über den öffentlichen
+Namen also nicht abrufbar. `waker.$DOMAIN`
 liegt hinter Authentik. Wer zusätzlich `WAKER_ADMIN_TOKEN` setzt, lässt es von
 Traefik injizieren, siehe die auskommentierte Middleware in
 `docker-compose.yml`.
@@ -116,7 +147,7 @@ existiert nur im AI-Image, der Arbeitsrechner schläft also nicht unter dir weg.
 | Kein Aufwachen | `docker compose logs ai-waker` zeigt jedes gesendete Paket. Gegenprobe vom Host aus mit `wakeonlan`. Sonst BIOS: ErP aus, WoL an. |
 | Weckt, aber Timeout | `WAKER_WAKE_TIMEOUT` hoch, im Image prüfen, ob Ollama auf `0.0.0.0` hört. |
 | iPXE lädt nichts | `docker compose --profile netboot logs -f dnsmasq-pxe`, dort steht der angefragte Dateiname. Bei "file not found" die Alternativzeile in `dnsmasq/pxe.conf` nehmen. |
-| Falsches OS startet | `curl http://localhost:8080/boot.ipxe` zeigt, was die Firmware bekommt. |
+| Falsches OS startet | `docker compose exec ai-waker wget -qO- http://127.0.0.1:8080/boot.ipxe` zeigt, was die Firmware bekommt. |
 | Nach Update kein WoL | In beiden Systemen `nmcli con modify <con> 802-3-ethernet.wake-on-lan magic`. |
 
 ## Nächste Schritte
