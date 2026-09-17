@@ -66,6 +66,11 @@ services:
     env_file: .env
     environment:
       WAKER_WOL_RELAY: /run/waker/wol.sock
+      # Safety net for the host network: should this container ever run the API
+      # server instead of the relay (a stale image without the wol-relay command),
+      # it binds to loopback instead of exposing ports on the LAN.
+      WAKER_LISTEN: 127.0.0.1:18080
+      WAKER_ADMIN_LISTEN: 127.0.0.1:18081
     command: ["wol-relay"]
     network_mode: host
     volumes:
