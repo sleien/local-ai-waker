@@ -182,9 +182,11 @@ selben Test mit 10 s nichts abgebrochen.
 Browser-Login machen können. Der Key geht als `Authorization: Bearer ...` oder
 `X-Api-Key` mit; OpenAI-SDKs und Open WebUI senden ihn als Bearer. Die
 Router-Regel deckt nur `/api` und `/v1` ab. `waker.$DOMAIN` liegt hinter
-Authentik. Wer zusätzlich `WAKER_ADMIN_TOKEN` setzt, lässt es von Traefik
-injizieren (auskommentierte Middleware in `docker-compose.yml`) und gibt es dem
-Homepage-Widget als Header `X-Waker-Token` mit.
+Authentik. `WAKER_ADMIN_TOKEN` ist eine optionale zweite Sperre: Traefik hängt den
+Token nach Authentik an jede Anfrage, der Browser merkt davon nichts. Aussen vor
+bleibt nur, wer Port 8081 ohne Traefik erreicht, etwa andere Container im
+Proxy-Netz. Das Homepage-Widget gehört dazu und braucht den Token dann als Header
+`X-Waker-Token`.
 
 **Ein Rechner für alles.** Anfragen landen im laufenden Desktop, auch während
 du arbeitest oder spielst. Spiel und Modell teilen sich dann die 24 GB VRAM.

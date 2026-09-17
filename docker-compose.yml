@@ -39,12 +39,12 @@ services:
       - "traefik.http.routers.ai-waker-admin.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
       - "traefik.http.routers.ai-waker-admin.tls.certresolver=${TRAEFIK_CERTRESOLVER:-le}"
       - "traefik.http.routers.ai-waker-admin.service=ai-waker-admin"
-      - "traefik.http.routers.ai-waker-admin.middlewares=${AUTHENTIK_MIDDLEWARE:-authentik@docker}"
+      - "traefik.http.routers.ai-waker-admin.middlewares=${AUTHENTIK_MIDDLEWARE:-authentik@docker},ai-waker-token"
       - "traefik.http.services.ai-waker-admin.loadbalancer.server.port=8081"
-
-      # If WAKER_ADMIN_TOKEN is set, let Traefik inject it so the browser does
-      # not have to. Append ",waker-token" to the middlewares line above.
-      # - "traefik.http.middlewares.waker-token.headers.customrequestheaders.X-Waker-Token=${WAKER_ADMIN_TOKEN}"
+      # After Authentik, Traefik adds WAKER_ADMIN_TOKEN to every request, so the
+      # optional token only locks out callers that bypass Traefik. Left empty,
+      # the header is stripped instead and the waker does not check it.
+      - "traefik.http.middlewares.ai-waker-token.headers.customrequestheaders.X-Waker-Token=${WAKER_ADMIN_TOKEN:-}"
 
 networks:
   proxy:
