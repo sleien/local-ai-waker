@@ -31,13 +31,26 @@ Zwei Listener im Container, keine veröffentlichten Ports. Von aussen geht alles
 
 ### Server
 
+Der Server braucht keinen Clone. `docker-compose.yml` baut direkt aus diesem
+GitHub-Repo: BuildKit fragt bei jedem Build den aktuellen Commit von `main` ab
+und baut nur neu, wenn sich etwas geändert hat. Auf den Server gehören zwei
+Dateien, im Verzeichnis deiner Compose-Stacks:
+
 ```bash
-cp .env.example .env
+mkdir ai-waker && cd ai-waker
+curl -fsSLO https://raw.githubusercontent.com/sleien/local-ai-waker/main/docker-compose.yml
+curl -fsSL -o .env https://raw.githubusercontent.com/sleien/local-ai-waker/main/.env.example
 chmod 600 .env
 openssl rand -hex 32        # Ergebnis als WAKER_API_KEY eintragen
 # WAKER_TARGET_HOST, WAKER_MAC, WAKER_WOL_TARGETS und DOMAIN anpassen
 docker compose up -d --build
 ```
+
+Auf den neusten Stand von `main` bringt dich wieder `docker compose up -d
+--build`. Für reproduzierbare Deployments statt `#main` einen Tag oder Commit
+in `build.context` eintragen. Lokale Änderungen sieht der Server-Build erst nach
+einem Push; auf dem eigenen Rechner testest du mit `docker build -t
+local-ai-waker .`.
 
 Nach Änderungen an `.env` wieder `docker compose up -d`. `docker compose
 restart` liest die Datei nicht neu ein, der Container liefe mit den alten Werten

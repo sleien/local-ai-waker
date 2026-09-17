@@ -1,6 +1,8 @@
 services:
   ai-waker:
-    build: .
+    build:
+      # Remote-Kontext: BuildKit klont das Repo und nimmt das Repo-Root als Build-Kontext.
+      context: https://github.com/sleien/local-ai-waker.git#main
     image: local-ai-waker:latest
     container_name: ai-waker
     restart: unless-stopped
