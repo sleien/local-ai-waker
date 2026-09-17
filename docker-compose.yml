@@ -39,7 +39,7 @@ services:
       - "traefik.http.routers.ai-waker-admin.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
       - "traefik.http.routers.ai-waker-admin.tls.certresolver=${TRAEFIK_CERTRESOLVER:-le}"
       - "traefik.http.routers.ai-waker-admin.service=ai-waker-admin"
-      - "traefik.http.routers.ai-waker-admin.middlewares=${AUTHENTIK_MIDDLEWARE:-authentik@file}"
+      - "traefik.http.routers.ai-waker-admin.middlewares=${AUTHENTIK_MIDDLEWARE:-authentik@docker}"
       - "traefik.http.services.ai-waker-admin.loadbalancer.server.port=8081"
 
       # If WAKER_ADMIN_TOKEN is set, let Traefik inject it so the browser does
