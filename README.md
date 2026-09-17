@@ -31,6 +31,18 @@ Zwei Listener im Container, keine veröffentlichten Ports. Von aussen geht alles
 
 ### Server
 
+Voraussetzungen im bestehenden Stack:
+
+- Docker Compose v2 und `git` auf dem Docker-Host, BuildKit klont das Repo damit
+- das externe Traefik-Netz (Name in `TRAEFIK_NETWORK`, Standard `proxy`)
+- DNS für `ai.<domain>` und `waker.<domain>` auf Traefik, etwa als Rewrite in
+  AdGuard Home
+- in Authentik ein Forward-Auth-Provider, der `waker.<domain>` abdeckt: Im
+  Domain-Modus passiert das automatisch, im Single-Application-Modus braucht es
+  eine eigene Application
+- der Server im selben LAN-Segment wie die Workstation, sonst kommt der
+  Broadcast nicht an
+
 Der Server braucht keinen Clone. `docker-compose.yml` baut direkt aus diesem
 GitHub-Repo: BuildKit fragt bei jedem Build den aktuellen Commit von `main` ab
 und baut nur neu, wenn sich etwas geändert hat. Auf den Server gehören zwei
@@ -61,22 +73,36 @@ kann die GPU benutzen und den PC wecken. Der Waker warnt dann beim Start im Log.
 
 ### Workstation
 
-Das Nobara-Setup-Repo richtet das ein, hier zum Nachprüfen:
+Das Setup-Repo `linux_setup` richtet die Workstation ein (Module `10-power-s3-wol`
+und `20-ollama`). Hier zum Nachprüfen:
 
 - BIOS: Wake on LAN an, ErP aus
 - Kernel-Parameter `mem_sleep_default=deep`, damit echtes S3 statt s2idle greift
 - `nvidia-suspend` und `nvidia-resume` aktiv
 - WoL nur per Magic Packet: `nmcli con modify <con> 802-3-ethernet.wake-on-lan magic`
-- Ollama mit `OLLAMA_HOST=0.0.0.0:11434`, `OLLAMA_KEEP_ALIVE=5m`, `OLLAMA_CONTEXT_LENGTH=32768`
-- Idle-Watchdog als systemd-Timer
+- Ollama mit `OLLAMA_HOST=0.0.0.0:11434` und `OLLAMA_KEEP_ALIVE=5m`
+- Idle-Watchdog als systemd-Timer: Standby, wenn kein Modell geladen ist, keine
+  Anfrage läuft und niemand am Rechner arbeitet. Eine gesperrte Sitzung gilt als
+  abwesend, die automatische Bildschirmsperre muss also an bleiben.
+- `ollama-sleep.service`: stoppt Ollama vor dem Standby, lädt beim Aufwachen
+  `nvidia_uvm` neu und startet Ollama erst dann. Ohne den Reload rechnet Ollama
+  nach einem Resume oft auf der CPU. Der Port öffnet erst, wenn die GPU wieder da
+  ist, der Waker wartet so lange.
 
-Vor dem ersten Einsatz einmal von Hand testen: `systemctl suspend`, über
-`https://waker.$DOMAIN` aufwecken, dann `nvidia-smi` und
-`curl http://localhost:11434/api/version`. Antworten beide, funktioniert S3 auf
-dem Board. Klemmt das Aufwachen, im Watchdog `systemctl poweroff` statt
-`systemctl suspend` eintragen. Der Waker braucht dafür keine Änderung, das
-Aufwachen dauert dann nur eine Minute statt Sekunden, und
-`WAKER_WAKE_TIMEOUT` ist auf einen vollen Boot ausgelegt.
+`OLLAMA_CONTEXT_LENGTH` setzt das Setup-Repo nicht, siehe Kontextlänge unten.
+
+Vor dem ersten Einsatz einmal von Hand testen:
+
+```bash
+sudo rtcwake -m no -s 60 && sudo systemctl suspend
+```
+
+Nach dem Aufwachen eine Anfrage schicken, dann muss `ollama ps` in der Spalte
+PROCESSOR `100% GPU` zeigen. Danach über `https://waker.<domain>` wecken statt
+per RTC. `rtcwake -m mem` eignet sich nicht, weil es systemd und damit die
+NVIDIA-Dienste umgeht. Klemmt das Aufwachen aus S3 grundsätzlich, im Watchdog
+`systemctl poweroff` statt `systemctl suspend` eintragen. Der Waker braucht dafür
+keine Änderung, das Aufwachen dauert dann nur eine Minute statt Sekunden.
 
 ## OpenAI-kompatible API
 
@@ -172,8 +198,8 @@ du aktiv bist.
 |---|---|
 | Kein Aufwachen | `docker compose logs ai-waker` zeigt jedes gesendete Paket. Gegenprobe vom Server mit `wakeonlan <mac>`. Sonst BIOS: ErP aus, WoL an. |
 | Weckt, aber Timeout | Auf der Workstation prüfen, ob Ollama nach dem Resume läuft und auf `0.0.0.0` hört. |
-| Wach, aber GPU weg | `nvidia-suspend` und `nvidia-resume` aktiv? `journalctl -b -u nvidia-resume`. |
+| Langsam nach dem Aufwachen | `ollama ps` zeigt CPU statt GPU: `journalctl -b -t ollama-idle` sagt, ob `nvidia_uvm` neu geladen wurde oder belegt war. |
 | Client sieht keine Modelle | `scripts/smoke-openai.sh` zeigt, ob `/models` live, aus dem Cache oder mit Fehler antwortet. |
 | PC wacht ohne Anfrage auf | WoL-Modus auf `magic` beschränken, siehe oben. |
-| PC schläft nie ein | Die Bedingungen des Watchdogs einzeln prüfen: `curl -s localhost:11434/api/ps` (Modell geladen?), `systemd-inhibit --list` (blockiert ein Programm?), `loginctl show-session <id> -p IdleHint` (`no` heisst aktiv). |
+| PC schläft nie ein | `sudo ollama-idle-watchdog --dry-run` auf der Workstation listet jede Bedingung, die den Standby verhindert. |
 | Nach Update kein WoL | `nmcli con modify <con> 802-3-ethernet.wake-on-lan magic` erneut setzen. |
