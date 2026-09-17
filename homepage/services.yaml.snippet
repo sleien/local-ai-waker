@@ -1,34 +1,22 @@
-# Snippet for gethomepage services.yaml. The admin listener is not published to
-# the LAN, so Homepage reaches it over the docker network by container name.
+# Snippet for gethomepage services.yaml. The admin listener is not published,
+# so Homepage reaches it over the docker network by container name.
+# If WAKER_ADMIN_TOKEN is set, add it under widget.headers as X-Waker-Token.
 - AI:
     - AI Waker:
         icon: mdi-power-sleep
         href: https://waker.example.ch/
-        description: Workstation wecken, Boot-Modus umschalten
+        description: Workstation aufwecken
         widget:
           type: customapi
           url: http://ai-waker:8081/status
           refreshInterval: 10000
           mappings:
             - field: online
-              label: Workstation
-              format: text
-            - field: mode
-              label: Boot-Modus
+              label: Wach
               format: text
             - field: loaded_models
               label: Modelle
               format: number
-
-    - Ollama:
-        icon: ollama
-        href: https://ai.example.ch/
-        description: Ollama auf der Workstation
-        widget:
-          type: customapi
-          url: http://ai-waker:8081/status
-          refreshInterval: 30000
-          mappings:
-            - field: target
-              label: Ziel
-              format: text
+            - field: last_wake
+              label: Geweckt
+              format: relativeDate

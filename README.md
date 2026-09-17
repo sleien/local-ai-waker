@@ -1,36 +1,69 @@
 # local-ai-waker
 
-Weckt die Workstation per Wake on LAN, sobald eine AI-Anfrage kommt, und
-leitet die Anfrage an Ollama weiter. Zusätzlich entscheidet der Dienst per
-iPXE, welches Betriebssystem startet: das schlanke AI-Image oder das
-produktive Linux.
+Weckt die Workstation per Wake on LAN aus dem Standby, sobald eine AI-Anfrage
+kommt, und leitet sie an Ollama weiter. OpenAI-kompatibel, Streaming inklusive.
 
 ```
-Client ──► Traefik ──► ai-waker ──┬─ TCP-Probe :11434 ─► Workstation
+Client ──► Traefik ──► ai-waker ──┬─ TCP-Probe :11434 ───► Workstation (Nobara, Ollama)
                                   ├─ Magic Packet (UDP 9/7)
                                   └─ Reverse Proxy (streaming)
-
-Workstation-Firmware ──► proxy-DHCP ──► iPXE ──► ai-waker /boot.ipxe
-                                                   ├─ mode=ai   ► Netboot AI-Image
-                                                   └─ mode=work ► exit, lokale NVMe
 ```
 
-Das Herunterfahren nach fünf Minuten Leerlauf macht der Watchdog im AI-Image,
-nicht dieser Dienst.
+Schlafen legt sich die Workstation selbst. Der Idle-Watchdog aus dem
+Nobara-Setup ruft `systemctl suspend`, sobald Ollama kein Modell mehr geladen
+hat (5 Minuten nach der letzten Anfrage), niemand am Rechner aktiv ist und kein
+Programm den Schlaf blockiert. Der Waker weckt nur.
 
 ## Endpunkte
 
-Zwei Listener im Container, **keine** veröffentlichten Ports. Alles von aussen
-kommt über Traefik, alles von innen über den Containernamen.
+Zwei Listener im Container, keine veröffentlichten Ports. Von aussen geht alles
+über Traefik, von innen über den Containernamen.
 
 | Port | Endpunkt | Erreichbar über | Auth |
 |---|---|---|---|
-| 8080 | `/api/*`, `/v1/*` | `https://ai.$DOMAIN` | `WAKER_API_KEY` |
-| 8080 | `/boot.ipxe`, `/netboot/*` | Traefik-Entrypoint `netboot`, Klartext-HTTP | keine, LAN only |
+| 8080 | `/v1/*`, `/api/*` | `https://ai.$DOMAIN` | `WAKER_API_KEY` |
 | 8080 | `/healthz` | intern | keine |
 | 8081 | `/` | `https://waker.$DOMAIN` | Authentik |
-| 8081 | `/status` | intern, z. B. `http://ai-waker:8081/status` | optional Token |
-| 8081 | `/mode`, `/wake` | wie oben | wie oben |
+| 8081 | `/status` | intern, `http://ai-waker:8081/status` | optional `WAKER_ADMIN_TOKEN` |
+| 8081 | `/wake` (POST) | wie `/status` | wie `/status` |
+
+## Setup
+
+### Server
+
+```bash
+cp .env.example .env
+chmod 600 .env
+openssl rand -hex 32        # Ergebnis als WAKER_API_KEY eintragen
+# WAKER_TARGET_HOST, WAKER_MAC, WAKER_WOL_TARGETS und DOMAIN anpassen
+docker compose up -d --build
+```
+
+Nach Änderungen an `.env` wieder `docker compose up -d`. `docker compose
+restart` liest die Datei nicht neu ein, der Container liefe mit den alten Werten
+weiter.
+
+Ist `WAKER_API_KEY` leer, ist `https://ai.$DOMAIN` ohne Anmeldung offen: Jeder
+kann die GPU benutzen und den PC wecken. Der Waker warnt dann beim Start im Log.
+
+### Workstation
+
+Das Nobara-Setup-Repo richtet das ein, hier zum Nachprüfen:
+
+- BIOS: Wake on LAN an, ErP aus
+- Kernel-Parameter `mem_sleep_default=deep`, damit echtes S3 statt s2idle greift
+- `nvidia-suspend` und `nvidia-resume` aktiv
+- WoL nur per Magic Packet: `nmcli con modify <con> 802-3-ethernet.wake-on-lan magic`
+- Ollama mit `OLLAMA_HOST=0.0.0.0:11434`, `OLLAMA_KEEP_ALIVE=5m`, `OLLAMA_CONTEXT_LENGTH=32768`
+- Idle-Watchdog als systemd-Timer
+
+Vor dem ersten Einsatz einmal von Hand testen: `systemctl suspend`, über
+`https://waker.$DOMAIN` aufwecken, dann `nvidia-smi` und
+`curl http://localhost:11434/api/version`. Antworten beide, funktioniert S3 auf
+dem Board. Klemmt das Aufwachen, im Watchdog `systemctl poweroff` statt
+`systemctl suspend` eintragen. Der Waker braucht dafür keine Änderung, das
+Aufwachen dauert dann nur eine Minute statt Sekunden, und
+`WAKER_WAKE_TIMEOUT` ist auf einen vollen Boot ausgelegt.
 
 ## OpenAI-kompatible API
 
@@ -83,72 +116,6 @@ wählt die Länge dann selbst anhand des VRAM. Auf der Workstation fest setzen,
 etwa `OLLAMA_CONTEXT_LENGTH=32768`. Zu lange Prompts kürzt Ollama sonst ohne
 Fehlermeldung.
 
-## Warum ein Klartext-Port, wenn Traefik da ist
-
-Für den AI-Pfad braucht es keinen: Clients gehen über `https://ai.$DOMAIN`,
-Container im selben Netz über `http://ai-waker:8080`. Der offene Port existiert
-allein für iPXE. Die Firmware kann kein TLS, folgt keinem 301 auf HTTPS und
-soll beim Booten nicht von DNS abhängen, holt das Skript also unter
-`http://192.168.1.10:8080/boot.ipxe`.
-
-Drei Wege, das zu lösen, in dieser Reihenfolge:
-
-1. **Eigener Traefik-Entrypoint** (so eingerichtet). In die statische Konfiguration:
-
-   ```yaml
-   entryPoints:
-     netboot:
-       address: ":8080"
-   ```
-
-   Am Traefik-Container `192.168.1.10:8080:8080` veröffentlichen, also an die
-   LAN-Adresse gebunden statt an `0.0.0.0`. Ein Ingress, ein Logfile, und die
-   Regel des Netboot-Routers deckt nur `/boot.ipxe` und `/netboot/` ab.
-2. **Über den bestehenden `web`-Entrypoint**, falls dein HTTPS-Redirect als
-   Router-Middleware hängt und nicht am Entrypoint. Dann kommt gar kein neuer
-   Port dazu: Netboot-Router auf `web`, ohne die Redirect-Middleware. Bei
-   `entryPoints.web.http.redirections` geht das nicht, das gilt für alle Router
-   des Entrypoints.
-3. **Port am Waker-Container** veröffentlichen. Der auskommentierte
-   `ports`-Block in `docker-compose.yml` bindet ihn an `WAKER_SERVER_IP`.
-   Nachteil: umgeht Traefik, und `/api/*` wäre dort nur durch
-   `WAKER_API_KEY` geschützt.
-
-Ohne Netboot, also solange du beim aktuellen Bootloader bleibst, braucht keine
-der drei Varianten einen Port.
-
-## Setup
-
-```bash
-cp .env.example .env
-# WAKER_TARGET_HOST, WAKER_MAC, WAKER_WOL_TARGETS, DOMAIN eintragen
-docker compose up -d --build
-```
-
-Test ohne Netboot, nur Wecken und Weiterleiten, direkt im Container:
-
-```bash
-docker compose exec ai-waker wget -qO- --post-data '{"model":"llama3.1","prompt":"hi"}' http://127.0.0.1:8080/api/generate
-```
-
-Der erste Aufruf blockiert, bis die Workstation antwortet (Boot plus Laden des
-Modells, typisch 45 bis 90 Sekunden). Die Antwort trägt dann
-`X-Waker-Cold-Start: 1`.
-
-### Netboot aktivieren
-
-```bash
-./scripts/fetch-ipxe.sh          # iPXE-Binaries nach ./tftp
-# LAN-Adressen in dnsmasq/pxe.conf anpassen
-docker compose --profile netboot up -d
-```
-
-Danach das AI-Image bauen und Kernel, initrd und `boot-ai.ipxe` nach
-`./netboot/` legen, siehe [netboot/README.md](netboot/README.md).
-
-Im BIOS des X870E: Wake on LAN einschalten, ErP ausschalten, UEFI Network
-Stack einschalten, Netzwerk vor der NVMe in die Bootreihenfolge.
-
 ## Wichtige Details
 
 **Broadcast aus dem Container.** Der Dienst hängt im Traefik-Bridge-Netz und
@@ -158,29 +125,6 @@ LAN weiter. Kommt nichts an, ist der schnellste Gegentest `network_mode: host`
 für den Container; dann braucht Traefik allerdings einen File-Provider statt
 der Docker-Labels.
 
-**Modus ist einmalig.** Nach einem `work`-Boot setzt der Dienst den Modus
-zurück auf `ai` (`WAKER_RESET_MODE_AFTER_BOOT`). Ein späteres automatisches
-Wecken durch eine Anfrage startet also wieder das AI-Image, nicht den Desktop.
-
-**Timeouts.** Traefik v3 mit Standardwerten reicht. Getestet mit 3.7: 75 s
-ohne Antwort (wie ein Kaltstart) und ein 80 s langer Stream kommen vollständig
-durch. Entscheidend ist `writeTimeout`, Default `0`, also unbegrenzt. Steht in
-deiner Konfiguration ein Wert, kappt Traefik jede längere Antwort: Mit
-`writeTimeout: 20s` brach der Stream nach 20 s ab und der Kaltstart bekam eine
-leere Antwort. `readTimeout` hat im selben Test mit 10 s nichts abgebrochen.
-
-`FlushInterval: -1` im Proxy sorgt dafür, dass Streaming-Antworten sofort
-durchgereicht werden statt gepuffert.
-
-**Auth.** `ai.$DOMAIN` läuft ohne Authentik, weil API-Clients keinen
-Browser-Login machen können; stattdessen `WAKER_API_KEY` setzen und als
-`Authorization: Bearer ...` oder `X-Api-Key` mitschicken. Die Router-Regel
-dort deckt nur `/api` und `/v1` ab, das Boot-Skript ist über den öffentlichen
-Namen also nicht abrufbar. `waker.$DOMAIN`
-liegt hinter Authentik. Wer zusätzlich `WAKER_ADMIN_TOKEN` setzt, lässt es von
-Traefik injizieren, siehe die auskommentierte Middleware in
-`docker-compose.yml`.
-
 **WoL nur per Magic Packet.** Der Waker prüft die Workstation per TCP auf
 Port 11434, bei jeder Anfrage, bei jeder `/status`-Abfrage von Homepage und
 alle `WAKER_CATALOG_REFRESH`. Wacht die Netzwerkkarte auch auf Unicast- oder
@@ -188,23 +132,35 @@ ARP-Pakete auf, holt schon diese Prüfung den Rechner aus dem Schlaf. In
 NetworkManager deshalb `802-3-ethernet.wake-on-lan magic` und nichts
 zusätzlich.
 
-**Arbeitsbetrieb.** Läuft auf dem produktiven Linux ebenfalls ein Ollama auf
-11434, findet der Proxy es direkt vor und weckt gar nichts. Der Watchdog
-existiert nur im AI-Image, der Arbeitsrechner schläft also nicht unter dir weg.
+**Timeouts.** Traefik v3 mit Standardwerten reicht. Getestet mit 3.7: 75 s
+ohne Antwort und ein 80 s langer Stream kommen vollständig durch. Entscheidend
+ist `writeTimeout`, Default `0`, also unbegrenzt. Steht in deiner Konfiguration
+ein Wert, kappt Traefik jede längere Antwort: Mit `writeTimeout: 20s` brach der
+Stream nach 20 s ab, und die späte Antwort kam leer an. `readTimeout` hat im
+selben Test mit 10 s nichts abgebrochen.
+
+**Auth.** `ai.$DOMAIN` läuft ohne Authentik, weil API-Clients keinen
+Browser-Login machen können. Der Key geht als `Authorization: Bearer ...` oder
+`X-Api-Key` mit; OpenAI-SDKs und Open WebUI senden ihn als Bearer. Die
+Router-Regel deckt nur `/api` und `/v1` ab. `waker.$DOMAIN` liegt hinter
+Authentik. Wer zusätzlich `WAKER_ADMIN_TOKEN` setzt, lässt es von Traefik
+injizieren (auskommentierte Middleware in `docker-compose.yml`) und gibt es dem
+Homepage-Widget als Header `X-Waker-Token` mit.
+
+**Ein Rechner für alles.** Anfragen landen im laufenden Desktop, auch während
+du arbeitest oder spielst. Spiel und Modell teilen sich dann die 24 GB VRAM.
+Passt beides nicht hinein, legt Ollama einen Teil des Modells auf die CPU und
+wird deutlich langsamer. Der Watchdog legt den Rechner nicht schlafen, solange
+du aktiv bist.
 
 ## Fehlersuche
 
 | Symptom | Ansatz |
 |---|---|
-| Kein Aufwachen | `docker compose logs ai-waker` zeigt jedes gesendete Paket. Gegenprobe vom Host aus mit `wakeonlan`. Sonst BIOS: ErP aus, WoL an. |
-| Weckt, aber Timeout | `WAKER_WAKE_TIMEOUT` hoch, im Image prüfen, ob Ollama auf `0.0.0.0` hört. |
-| iPXE lädt nichts | `docker compose --profile netboot logs -f dnsmasq-pxe`, dort steht der angefragte Dateiname. Bei "file not found" die Alternativzeile in `dnsmasq/pxe.conf` nehmen. |
+| Kein Aufwachen | `docker compose logs ai-waker` zeigt jedes gesendete Paket. Gegenprobe vom Server mit `wakeonlan <mac>`. Sonst BIOS: ErP aus, WoL an. |
+| Weckt, aber Timeout | Auf der Workstation prüfen, ob Ollama nach dem Resume läuft und auf `0.0.0.0` hört. |
+| Wach, aber GPU weg | `nvidia-suspend` und `nvidia-resume` aktiv? `journalctl -b -u nvidia-resume`. |
 | Client sieht keine Modelle | `scripts/smoke-openai.sh` zeigt, ob `/models` live, aus dem Cache oder mit Fehler antwortet. |
-| PC wacht ohne Anfrage auf | WoL-Modus der Netzwerkkarte auf `magic` beschränken, siehe oben. |
-| Falsches OS startet | `docker compose exec ai-waker wget -qO- http://127.0.0.1:8080/boot.ipxe` zeigt, was die Firmware bekommt. |
-| Nach Update kein WoL | In beiden Systemen `nmcli con modify <con> 802-3-ethernet.wake-on-lan magic`. |
-
-## Nächste Schritte
-
-Das AI-Image selbst (NixOS-Netboot mit NVIDIA, Ollama und dem
-Idle-Watchdog) ist noch nicht Teil dieses Repos.
+| PC wacht ohne Anfrage auf | WoL-Modus auf `magic` beschränken, siehe oben. |
+| PC schläft nie ein | Die Bedingungen des Watchdogs einzeln prüfen: `curl -s localhost:11434/api/ps` (Modell geladen?), `systemd-inhibit --list` (blockiert ein Programm?), `loginctl show-session <id> -p IdleHint` (`no` heisst aktiv). |
+| Nach Update kein WoL | `nmcli con modify <con> 802-3-ethernet.wake-on-lan magic` erneut setzen. |

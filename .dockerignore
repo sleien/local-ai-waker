@@ -1,8 +1,5 @@
 .git
 data
-netboot
-tftp
 README.md
 homepage
 scripts
-dnsmasq

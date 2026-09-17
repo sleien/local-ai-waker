@@ -12,23 +12,21 @@ import (
 	"time"
 )
 
-// Waker owns the wake state machine. Concurrent requests that arrive during a
-// cold start share a single wake attempt instead of spamming magic packets.
+// Waker owns the wake state machine. Concurrent requests that arrive while the
+// workstation resumes share a single wake attempt instead of spamming packets.
 type Waker struct {
 	cfg     Config
-	state   *State
 	catalog *Catalog
 
-	mu        sync.Mutex
-	waking    bool
-	done      chan struct{}
-	wakeErr   error
-	lastWake  time.Time
-	lastWakeD time.Duration
+	mu       sync.Mutex
+	waking   bool
+	done     chan struct{}
+	wakeErr  error
+	lastWake time.Time
 }
 
-func newWaker(cfg Config, state *State, catalog *Catalog) *Waker {
-	return &Waker{cfg: cfg, state: state, catalog: catalog}
+func newWaker(cfg Config, catalog *Catalog) *Waker {
+	return &Waker{cfg: cfg, catalog: catalog}
 }
 
 // Online reports whether the Ollama port on the workstation accepts connections.
@@ -41,28 +39,35 @@ func (w *Waker) Online() bool {
 	return true
 }
 
-func (w *Waker) Waking() bool {
+// Status reports whether a wake attempt is running and when the last one started.
+func (w *Waker) Status() (waking bool, lastWake time.Time) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.waking
+	return w.waking, w.lastWake
+}
+
+// StartWake launches the wake loop unless one is already running. The returned
+// channel closes when that attempt ends.
+func (w *Waker) StartWake() <-chan struct{} {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.waking {
+		w.waking = true
+		w.lastWake = time.Now()
+		w.done = make(chan struct{})
+		go w.wakeLoop()
+	}
+	return w.done
 }
 
 // EnsureOnline returns once the workstation answers, waking it if needed.
-// cold is true when this request had to wait for a boot.
+// cold is true when this request had to wait for the resume.
 func (w *Waker) EnsureOnline(ctx context.Context) (cold bool, err error) {
 	if w.Online() {
 		return false, nil
 	}
 
-	w.mu.Lock()
-	if !w.waking {
-		w.waking = true
-		w.done = make(chan struct{})
-		go w.wakeLoop()
-	}
-	done := w.done
-	w.mu.Unlock()
-
+	done := w.StartWake()
 	select {
 	case <-done:
 		w.mu.Lock()
@@ -74,15 +79,6 @@ func (w *Waker) EnsureOnline(ctx context.Context) (cold bool, err error) {
 	}
 }
 
-// Wake sends a magic packet without waiting, used by the admin endpoints.
-func (w *Waker) Wake() error {
-	w.mu.Lock()
-	w.lastWake = time.Now()
-	w.mu.Unlock()
-	log.Printf("wol: sending magic packet for %s to %v", w.cfg.MAC, w.cfg.WOLTargets)
-	return sendMagicPacket(w.cfg.MAC, w.cfg.WOLTargets)
-}
-
 func (w *Waker) wakeLoop() {
 	started := time.Now()
 	var werr error
@@ -91,22 +87,18 @@ func (w *Waker) wakeLoop() {
 		w.mu.Lock()
 		w.waking = false
 		w.wakeErr = werr
-		w.lastWakeD = time.Since(started)
 		close(w.done)
 		w.mu.Unlock()
 	}()
-
-	// A wake triggered by an AI request must boot the AI image, never the desktop.
-	if err := w.state.Set(ModeAI); err != nil {
-		log.Printf("wake: could not persist ai mode: %v", err)
-	}
 
 	deadline := started.Add(w.cfg.WakeTimeout)
 	var lastSend time.Time
 
 	for time.Now().Before(deadline) {
+		// UDP gives no delivery guarantee, so keep sending until the box answers.
 		if time.Since(lastSend) >= w.cfg.WOLRepeat {
-			if err := w.Wake(); err != nil {
+			log.Printf("wol: sending magic packet for %s to %v", w.cfg.MAC, w.cfg.WOLTargets)
+			if err := sendMagicPacket(w.cfg.MAC, w.cfg.WOLTargets); err != nil {
 				log.Printf("wake: %v", err)
 			}
 			lastSend = time.Now()

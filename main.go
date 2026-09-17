@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -20,35 +21,33 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
-	state := newState(cfg.StateFile, cfg.DefaultMode)
-	waker := newWaker(cfg, state, newCatalog(cfg.CatalogFile))
+	waker := newWaker(cfg, newCatalog(cfg.CatalogFile))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go waker.catalogLoop(ctx)
 
 	log.Printf("target %s, mac %s, wol targets %v", cfg.TargetAddr(), cfg.MAC, cfg.WOLTargets)
-	log.Printf("boot mode is %q, netboot base %s", state.Mode(), cfg.NetbootBase)
+	if cfg.APIKey == "" {
+		log.Print("WARNING: WAKER_API_KEY is empty, the API accepts requests without authentication")
+	}
 
-	// LAN listener: iPXE and AI clients talk to this one.
+	// Proxy listener: OpenAI and Ollama API clients, reached through Traefik.
 	pub := http.NewServeMux()
 	pub.HandleFunc("/healthz", handleHealthz)
-	pub.HandleFunc("/boot.ipxe", waker.handleBoot)
-	pub.Handle("/netboot/", http.StripPrefix("/netboot/", http.FileServer(http.Dir(cfg.NetbootDir))))
 	pub.Handle("/", waker.apiKeyGuard(waker.proxyHandler()))
 
-	// Admin listener: not published to the LAN, reached through Traefik.
+	// Admin listener: status and wake button, behind Authentik.
 	adm := http.NewServeMux()
 	adm.HandleFunc("/healthz", handleHealthz)
 	adm.Handle("/status", waker.adminGuard(http.HandlerFunc(waker.handleStatus)))
-	adm.Handle("/mode", waker.adminGuard(http.HandlerFunc(waker.handleMode)))
 	adm.Handle("/wake", waker.adminGuard(http.HandlerFunc(waker.handleWake)))
 	adm.Handle("/", waker.adminGuard(http.HandlerFunc(handleIndex)))
 
 	servers := []*http.Server{
 		{
 			Addr:     cfg.Listen,
-			Handler:  logRequests("lan", pub),
+			Handler:  logRequests("api", pub),
 			ErrorLog: log.Default(),
 			// No write timeout: streamed generations run long.
 			ReadHeaderTimeout: 30 * time.Second,
@@ -105,4 +104,11 @@ func logRequests(tag string, next http.Handler) http.Handler {
 		next.ServeHTTP(rw, r)
 		log.Printf("%s %s %s %s %s", tag, clientIP(r), r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
 	})
+}
+
+func clientIP(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
