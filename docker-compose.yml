@@ -7,9 +7,15 @@ services:
     container_name: ai-waker
     restart: unless-stopped
     env_file: .env
+    environment:
+      # Magic packets go out through wol-relay, see there.
+      WAKER_WOL_RELAY: /run/waker/wol.sock
     volumes:
       # Model list cache, so polling clients do not wake the workstation.
       - ./data:/data
+      - wol-relay:/run/waker
+    depends_on:
+      - wol-relay
     networks:
       - proxy
     # No published ports. Everything from outside comes through Traefik,
@@ -46,7 +52,35 @@ services:
       # the header is stripped instead and the waker does not check it.
       - "traefik.http.middlewares.ai-waker-token.headers.customrequestheaders.X-Waker-Token=${WAKER_ADMIN_TOKEN:-}"
 
+  wol-relay:
+    # Same image, different job. A broadcast from a Docker bridge network never
+    # reaches the LAN (Linux does not forward directed broadcasts), so this part
+    # runs in the host's network namespace and only sends the magic packets.
+    # It opens no port; ai-waker reaches it over the socket on the shared volume.
+    build:
+      # Remote-Kontext: BuildKit klont das Repo und nimmt das Repo-Root als Build-Kontext.
+      context: https://github.com/sleien/local-ai-waker.git#main
+    image: local-ai-waker:latest
+    container_name: ai-waker-wol-relay
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      WAKER_WOL_RELAY: /run/waker/wol.sock
+    command: ["wol-relay"]
+    network_mode: host
+    volumes:
+      - wol-relay:/run/waker
+    healthcheck:
+      test: ["CMD", "test", "-S", "/run/waker/wol.sock"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
 networks:
   proxy:
     name: ${TRAEFIK_NETWORK:-proxy}
     external: true
+
+volumes:
+  wol-relay:

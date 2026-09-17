@@ -21,13 +21,29 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
+	if len(os.Args) > 1 && os.Args[1] == "wol-relay" {
+		if cfg.WOLRelay == "" {
+			log.Fatal("config: WAKER_WOL_RELAY is required for wol-relay")
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := runRelay(ctx, cfg, cfg.WOLRelay); err != nil {
+			log.Fatalf("wol relay: %v", err)
+		}
+		return
+	}
+
 	waker := newWaker(cfg, newCatalog(cfg.CatalogFile))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go waker.catalogLoop(ctx)
 
-	log.Printf("target %s, mac %s, wol targets %v", cfg.TargetAddr(), cfg.MAC, cfg.WOLTargets)
+	if cfg.WOLRelay != "" {
+		log.Printf("target %s, mac %s, magic packets via relay %s", cfg.TargetAddr(), cfg.MAC, cfg.WOLRelay)
+	} else {
+		log.Printf("target %s, mac %s, wol targets %v", cfg.TargetAddr(), cfg.MAC, cfg.WOLTargets)
+	}
 	if cfg.APIKey == "" {
 		log.Print("WARNING: WAKER_API_KEY is empty, the API accepts requests without authentication")
 	}

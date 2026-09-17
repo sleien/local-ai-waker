@@ -97,8 +97,7 @@ func (w *Waker) wakeLoop() {
 	for time.Now().Before(deadline) {
 		// UDP gives no delivery guarantee, so keep sending until the box answers.
 		if time.Since(lastSend) >= w.cfg.WOLRepeat {
-			log.Printf("wol: sending magic packet for %s to %v", w.cfg.MAC, w.cfg.WOLTargets)
-			if err := sendMagicPacket(w.cfg.MAC, w.cfg.WOLTargets); err != nil {
+			if err := w.sendWake(); err != nil {
 				log.Printf("wake: %v", err)
 			}
 			lastSend = time.Now()
@@ -113,6 +112,16 @@ func (w *Waker) wakeLoop() {
 
 	werr = fmt.Errorf("workstation %s did not answer within %s", w.cfg.TargetAddr(), w.cfg.WakeTimeout)
 	log.Printf("wake: %v", werr)
+}
+
+// sendWake sends the magic packets, through the relay when one is configured.
+func (w *Waker) sendWake() error {
+	if w.cfg.WOLRelay != "" {
+		log.Printf("wol: asking relay %s to wake %s", w.cfg.WOLRelay, w.cfg.MAC)
+		return requestRelay(w.cfg.WOLRelay)
+	}
+	log.Printf("wol: sending magic packet for %s to %v", w.cfg.MAC, w.cfg.WOLTargets)
+	return sendMagicPacket(w.cfg.MAC, w.cfg.WOLTargets)
 }
 
 // ollamaPS returns the currently loaded models, if the workstation is up.

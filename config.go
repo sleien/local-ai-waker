@@ -19,6 +19,7 @@ type Config struct {
 
 	MAC        net.HardwareAddr
 	WOLTargets []string // pre-built "host:port" list for the magic packets
+	WOLRelay   string   // unix socket of the relay; empty sends the packets directly
 
 	WakeTimeout   time.Duration // give up if the box is not up by then
 	ProbeInterval time.Duration // TCP probe cadence while waking
@@ -38,6 +39,7 @@ func loadConfig() (Config, error) {
 		AdminListen: env("WAKER_ADMIN_LISTEN", ":8081"),
 		TargetHost:  env("WAKER_TARGET_HOST", ""),
 		CatalogFile: env("WAKER_CATALOG_FILE", "/data/catalog.json"),
+		WOLRelay:    env("WAKER_WOL_RELAY", ""),
 		APIKey:      env("WAKER_API_KEY", ""),
 		AdminToken:  env("WAKER_ADMIN_TOKEN", ""),
 	}

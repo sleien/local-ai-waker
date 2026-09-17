@@ -4,8 +4,8 @@ Weckt die Workstation per Wake on LAN aus dem Standby, sobald eine AI-Anfrage
 kommt, und leitet sie an Ollama weiter. OpenAI-kompatibel, Streaming inklusive.
 
 ```
-Client ──► Traefik ──► ai-waker ──┬─ TCP-Probe :11434 ───► Workstation (Nobara, Ollama)
-                                  ├─ Magic Packet (UDP 9/7)
+Client ──► Traefik ──► ai-waker ──┬─ TCP-Probe :11434 ──────────────────► Workstation (Nobara, Ollama)
+                                  ├─ Unix-Socket ─► wol-relay (Host-Netz) ─ Magic Packet (UDP 9/7)
                                   └─ Reverse Proxy (streaming)
 ```
 
@@ -157,12 +157,16 @@ Fehlermeldung.
 
 ## Wichtige Details
 
-**Broadcast aus dem Container.** Der Dienst hängt im Traefik-Bridge-Netz und
-schickt das Magic Packet an die Subnetz-Broadcast-Adresse (`192.168.1.255`),
-nicht an `255.255.255.255`. Der Host leitet das als Link-Layer-Broadcast ins
-LAN weiter. Kommt nichts an, ist der schnellste Gegentest `network_mode: host`
-für den Container; dann braucht Traefik allerdings einen File-Provider statt
-der Docker-Labels.
+**Magic Packet über das Relay.** Aus einem Container im Bridge-Netz erreicht
+kein Magic Packet das LAN. Nachgestellt mit Linux-Namespaces kam nichts an:
+weder der Subnetz-Broadcast (Linux leitet gerichtete Broadcasts nicht weiter,
+`bc_forwarding=0`) noch `255.255.255.255` noch Unicast an die IP des schlafenden
+PCs, der kein ARP beantwortet. Deshalb sendet `wol-relay` die Pakete: dasselbe
+Image mit `network_mode: host`, ohne offenen Port. `ai-waker` fragt es über einen
+Unix-Socket auf dem Volume `wol-relay`. Aus dem Host-Netz kommt der Broadcast an
+`ff:ff:ff:ff:ff:ff` im LAN an. `bc_forwarding=1` oder ein statischer ARP-Eintrag
+am Host würden auch funktionieren, gehen aber still kaputt, sobald das Docker-Netz
+oder die Interfaces neu entstehen.
 
 **WoL nur per Magic Packet.** Der Waker prüft die Workstation per TCP auf
 Port 11434, bei jeder Anfrage, bei jeder `/status`-Abfrage von Homepage und
@@ -198,7 +202,7 @@ du aktiv bist.
 
 | Symptom | Ansatz |
 |---|---|
-| Kein Aufwachen | `docker compose logs ai-waker` zeigt jedes gesendete Paket. Gegenprobe vom Server mit `wakeonlan <mac>`. Sonst BIOS: ErP aus, WoL an. |
+| Kein Aufwachen | `docker compose logs ai-waker wol-relay`: `ai-waker` fragt das Relay an, `wol-relay` meldet jedes gesendete Paket. Gegenprobe direkt auf dem Server mit `wakeonlan <mac>`. Weckt auch das nicht, liegt es an der Workstation: BIOS (ErP aus, WoL an) und WoL-Modus `magic`. |
 | Weckt, aber Timeout | Auf der Workstation prüfen, ob Ollama nach dem Resume läuft und auf `0.0.0.0` hört. |
 | Langsam nach dem Aufwachen | `ollama ps` zeigt CPU statt GPU: `journalctl -b -t ollama-idle` sagt, ob `nvidia_uvm` neu geladen wurde oder belegt war. |
 | Client sieht keine Modelle | `scripts/smoke-openai.sh` zeigt, ob `/models` live, aus dem Cache oder mit Fehler antwortet. |
