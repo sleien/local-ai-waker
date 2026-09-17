@@ -30,7 +30,10 @@ type Config struct {
 	ProbeTimeout  time.Duration // per-probe dial timeout
 	WOLRepeat     time.Duration // resend the magic packet this often
 
-	StateFile   string
+	StateFile      string
+	CatalogFile    string
+	CatalogRefresh time.Duration // how often to re-read the model list while online
+
 	NetbootDir  string
 	NetbootBase string // URL prefix iPXE uses to fetch kernel/initrd
 
@@ -47,6 +50,7 @@ func loadConfig() (Config, error) {
 		AdminListen:    env("WAKER_ADMIN_LISTEN", ":8081"),
 		TargetHost:     env("WAKER_TARGET_HOST", ""),
 		StateFile:      env("WAKER_STATE_FILE", "/data/state.json"),
+		CatalogFile:    env("WAKER_CATALOG_FILE", "/data/catalog.json"),
 		NetbootDir:     env("WAKER_NETBOOT_DIR", "/netboot"),
 		NetbootBase:    strings.TrimRight(env("WAKER_NETBOOT_BASE_URL", ""), "/"),
 		APIKey:         env("WAKER_API_KEY", ""),
@@ -79,6 +83,9 @@ func loadConfig() (Config, error) {
 		return c, err
 	}
 	if c.WOLRepeat, err = envDur("WAKER_WOL_REPEAT", 15*time.Second); err != nil {
+		return c, err
+	}
+	if c.CatalogRefresh, err = envDur("WAKER_CATALOG_REFRESH", 5*time.Minute); err != nil {
 		return c, err
 	}
 

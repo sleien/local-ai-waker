@@ -23,6 +23,15 @@ func (w *Waker) proxyHandler() http.Handler {
 	target := &url.URL{Scheme: "http", Host: w.cfg.TargetAddr()}
 
 	rp := httputil.NewSingleHostReverseProxy(target)
+	director := rp.Director
+	rp.Director = func(req *http.Request) {
+		director(req)
+		if w.cfg.APIKey != "" {
+			// The key authenticates against the waker; keep it out of upstream logs.
+			req.Header.Del("Authorization")
+			req.Header.Del("X-Api-Key")
+		}
+	}
 	// -1 flushes immediately, which is what token streaming needs.
 	rp.FlushInterval = -1
 	rp.Transport = &http.Transport{
@@ -39,23 +48,27 @@ func (w *Waker) proxyHandler() http.Handler {
 	}
 	rp.ErrorHandler = func(rw http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("proxy: %s %s: %v", r.Method, r.URL.Path, err)
-		http.Error(rw, "upstream error: "+err.Error(), http.StatusBadGateway)
+		writeAPIError(rw, r, http.StatusBadGateway, "upstream error: "+err.Error(), "server_error", "upstream_error")
 	}
 	rp.ModifyResponse = func(resp *http.Response) error {
 		if cold, _ := resp.Request.Context().Value(ctxColdStart).(bool); cold {
 			resp.Header.Set("X-Waker-Cold-Start", "1")
 		}
-		return nil
+		return w.captureDiscovery(resp)
 	}
 
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if w.serveDiscovery(rw, r) {
+			return
+		}
+
 		wakeCtx, cancel := context.WithTimeout(r.Context(), w.cfg.WakeTimeout+30*time.Second)
 		cold, err := w.EnsureOnline(wakeCtx)
 		cancel()
 		if err != nil {
 			log.Printf("proxy: wake failed for %s %s: %v", r.Method, r.URL.Path, err)
 			rw.Header().Set("Retry-After", strconv.Itoa(int(w.cfg.WakeTimeout.Seconds())))
-			http.Error(rw, "workstation unavailable: "+err.Error(), http.StatusServiceUnavailable)
+			writeAPIError(rw, r, http.StatusServiceUnavailable, "workstation unavailable: "+err.Error(), "server_error", "workstation_unavailable")
 			return
 		}
 		// The proxied request itself stays untimed: generation can be long.
@@ -74,11 +87,28 @@ func (w *Waker) apiKeyGuard(next http.Handler) http.Handler {
 	}
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		if !tokenMatches(key, bearerToken(r), r.Header.Get("X-Api-Key")) {
-			http.Error(rw, "unauthorized", http.StatusUnauthorized)
+			writeAPIError(rw, r, http.StatusUnauthorized, "invalid or missing API key", "invalid_request_error", "invalid_api_key")
 			return
 		}
 		next.ServeHTTP(rw, r)
 	})
+}
+
+// writeAPIError answers in the shape the caller's client library parses:
+// OpenAI's error object under /v1, Ollama's {"error": "..."} everywhere else.
+// An empty code is sent as null, like Ollama does.
+func writeAPIError(rw http.ResponseWriter, r *http.Request, status int, message, errType, code string) {
+	if strings.HasPrefix(r.URL.Path, "/v1/") {
+		var codeField any
+		if code != "" {
+			codeField = code
+		}
+		writeJSON(rw, status, map[string]any{
+			"error": map[string]any{"message": message, "type": errType, "param": nil, "code": codeField},
+		})
+		return
+	}
+	writeJSON(rw, status, map[string]string{"error": message})
 }
 
 func bearerToken(r *http.Request) string {

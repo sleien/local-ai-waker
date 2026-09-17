@@ -21,7 +21,11 @@ func main() {
 	}
 
 	state := newState(cfg.StateFile, cfg.DefaultMode)
-	waker := newWaker(cfg, state)
+	waker := newWaker(cfg, state, newCatalog(cfg.CatalogFile))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go waker.catalogLoop(ctx)
 
 	log.Printf("target %s, mac %s, wol targets %v", cfg.TargetAddr(), cfg.MAC, cfg.WOLTargets)
 	log.Printf("boot mode is %q, netboot base %s", state.Mode(), cfg.NetbootBase)
@@ -72,11 +76,12 @@ func main() {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 	log.Print("shutting down")
+	cancel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
 	for _, srv := range servers {
-		_ = srv.Shutdown(ctx)
+		_ = srv.Shutdown(shutdownCtx)
 	}
 }
 

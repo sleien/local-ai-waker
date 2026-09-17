@@ -15,8 +15,9 @@ import (
 // Waker owns the wake state machine. Concurrent requests that arrive during a
 // cold start share a single wake attempt instead of spamming magic packets.
 type Waker struct {
-	cfg   Config
-	state *State
+	cfg     Config
+	state   *State
+	catalog *Catalog
 
 	mu        sync.Mutex
 	waking    bool
@@ -26,8 +27,8 @@ type Waker struct {
 	lastWakeD time.Duration
 }
 
-func newWaker(cfg Config, state *State) *Waker {
-	return &Waker{cfg: cfg, state: state}
+func newWaker(cfg Config, state *State, catalog *Catalog) *Waker {
+	return &Waker{cfg: cfg, state: state, catalog: catalog}
 }
 
 // Online reports whether the Ollama port on the workstation accepts connections.
@@ -112,6 +113,7 @@ func (w *Waker) wakeLoop() {
 		}
 		if w.Online() {
 			log.Printf("wake: workstation up after %s", time.Since(started).Round(time.Second))
+			go w.refreshCatalog(context.Background())
 			return
 		}
 		time.Sleep(w.cfg.ProbeInterval)

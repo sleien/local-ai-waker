@@ -58,21 +58,26 @@ func (s *State) Set(mode string) error {
 	return s.persist()
 }
 
-// persist writes the state file atomically; callers hold s.mu.
+// persist writes the state file; callers hold s.mu.
 func (s *State) persist() error {
 	if s.path == "" {
 		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
 	}
 	b, err := json.MarshalIndent(s.data, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+	return writeFileAtomic(s.path, append(b, '\n'))
+}
+
+// writeFileAtomic replaces path in one step, so a crash never leaves half a file.
+func writeFileAtomic(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

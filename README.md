@@ -32,6 +32,57 @@ kommt über Traefik, alles von innen über den Containernamen.
 | 8081 | `/status` | intern, z. B. `http://ai-waker:8081/status` | optional Token |
 | 8081 | `/mode`, `/wake` | wie oben | wie oben |
 
+## OpenAI-kompatible API
+
+Ollama bringt unter `/v1` eine OpenAI-kompatible API mit, der Waker reicht sie
+durch. Client-Konfiguration:
+
+- Base URL: `https://ai.$DOMAIN/v1`
+- API Key: Wert von `WAKER_API_KEY`
+- Modell: der Name, wie Ollama ihn listet (`qwen2.5:32b`), nicht `gpt-4o`
+
+Getestet mit dem offiziellen `openai` Python SDK gegen Ollama 0.34.1:
+`models.list`, `models.retrieve`, Chat Completions mit und ohne Streaming,
+Embeddings (mit einem Embedding-Modell), Responses API, falscher Key als
+`AuthenticationError`. Streaming kommt tokenweise an, der Proxy puffert nicht.
+
+Gegen das echte Deployment, am besten einmal bei schlafender Workstation:
+
+```bash
+scripts/smoke-openai.sh https://ai.example.ch/v1 "$WAKER_API_KEY" qwen2.5:32b
+```
+
+**Wer weckt, wer nicht.** Nur Anfragen, die ein Modell benutzen, wecken die
+Workstation. Schläft sie, beantwortet der Waker die Abfragen, mit denen Clients
+Modelle auflisten oder die Erreichbarkeit prüfen, selbst:
+
+| Endpunkt | Antwort im Schlaf |
+|---|---|
+| `GET /v1/models`, `/v1/models/{id}` | letzte bekannte Liste |
+| `GET /api/tags`, `/api/version` | letzter bekannter Stand |
+| `GET /api/ps` | leere Liste, im Schlaf ist nichts geladen |
+| `GET /` | `Ollama is running` |
+
+Solche Antworten tragen `X-Waker-Cached: 1`. Der Cache liegt in
+`/data/catalog.json`, übersteht Neustarts und wird bei laufender Workstation
+alle `WAKER_CATALOG_REFRESH` sowie nach jedem Aufwachen aufgefrischt. Ist noch
+nichts gecacht, weckt die erste Abfrage einmal. Ohne Cache würde Open WebUI den
+Rechner bei jedem Seitenaufruf wecken, weil es dabei die Modellliste lädt.
+
+Im echten LAN kommt die gecachte Antwort nach dem Probe-Timeout
+(`WAKER_PROBE_TIMEOUT`, 2 s): Ein schlafender Host lehnt die Verbindung nicht
+ab, er schweigt.
+
+**Fehler** kommen unter `/v1` im OpenAI-Format, unter `/api` im Ollama-Format,
+damit die Client-Bibliotheken typisierte Fehler werfen. Ein unbekanntes Modell
+sieht im Schlaf genauso aus wie bei laufender Workstation. Den API-Key entfernt
+der Waker vor dem Weiterleiten.
+
+**Kontextlänge.** OpenAI-Clients können `num_ctx` nicht mitschicken, Ollama
+wählt die Länge dann selbst anhand des VRAM. Auf der Workstation fest setzen,
+etwa `OLLAMA_CONTEXT_LENGTH=32768`. Zu lange Prompts kürzt Ollama sonst ohne
+Fehlermeldung.
+
 ## Warum ein Klartext-Port, wenn Traefik da ist
 
 Für den AI-Pfad braucht es keinen: Clients gehen über `https://ai.$DOMAIN`,
@@ -111,18 +162,12 @@ der Docker-Labels.
 zurück auf `ai` (`WAKER_RESET_MODE_AFTER_BOOT`). Ein späteres automatisches
 Wecken durch eine Anfrage startet also wieder das AI-Image, nicht den Desktop.
 
-**Timeouts.** Ein Kaltstart dauert länger als jeder Standard-Timeout. In der
-statischen Traefik-Konfiguration:
-
-```yaml
-entryPoints:
-  websecure:
-    transport:
-      respondingTimeouts:
-        readTimeout: 0
-        writeTimeout: 0
-        idleTimeout: 180s
-```
+**Timeouts.** Traefik v3 mit Standardwerten reicht. Getestet mit 3.7: 75 s
+ohne Antwort (wie ein Kaltstart) und ein 80 s langer Stream kommen vollständig
+durch. Entscheidend ist `writeTimeout`, Default `0`, also unbegrenzt. Steht in
+deiner Konfiguration ein Wert, kappt Traefik jede längere Antwort: Mit
+`writeTimeout: 20s` brach der Stream nach 20 s ab und der Kaltstart bekam eine
+leere Antwort. `readTimeout` hat im selben Test mit 10 s nichts abgebrochen.
 
 `FlushInterval: -1` im Proxy sorgt dafür, dass Streaming-Antworten sofort
 durchgereicht werden statt gepuffert.
@@ -136,6 +181,13 @@ liegt hinter Authentik. Wer zusätzlich `WAKER_ADMIN_TOKEN` setzt, lässt es von
 Traefik injizieren, siehe die auskommentierte Middleware in
 `docker-compose.yml`.
 
+**WoL nur per Magic Packet.** Der Waker prüft die Workstation per TCP auf
+Port 11434, bei jeder Anfrage, bei jeder `/status`-Abfrage von Homepage und
+alle `WAKER_CATALOG_REFRESH`. Wacht die Netzwerkkarte auch auf Unicast- oder
+ARP-Pakete auf, holt schon diese Prüfung den Rechner aus dem Schlaf. In
+NetworkManager deshalb `802-3-ethernet.wake-on-lan magic` und nichts
+zusätzlich.
+
 **Arbeitsbetrieb.** Läuft auf dem produktiven Linux ebenfalls ein Ollama auf
 11434, findet der Proxy es direkt vor und weckt gar nichts. Der Watchdog
 existiert nur im AI-Image, der Arbeitsrechner schläft also nicht unter dir weg.
@@ -147,6 +199,8 @@ existiert nur im AI-Image, der Arbeitsrechner schläft also nicht unter dir weg.
 | Kein Aufwachen | `docker compose logs ai-waker` zeigt jedes gesendete Paket. Gegenprobe vom Host aus mit `wakeonlan`. Sonst BIOS: ErP aus, WoL an. |
 | Weckt, aber Timeout | `WAKER_WAKE_TIMEOUT` hoch, im Image prüfen, ob Ollama auf `0.0.0.0` hört. |
 | iPXE lädt nichts | `docker compose --profile netboot logs -f dnsmasq-pxe`, dort steht der angefragte Dateiname. Bei "file not found" die Alternativzeile in `dnsmasq/pxe.conf` nehmen. |
+| Client sieht keine Modelle | `scripts/smoke-openai.sh` zeigt, ob `/models` live, aus dem Cache oder mit Fehler antwortet. |
+| PC wacht ohne Anfrage auf | WoL-Modus der Netzwerkkarte auf `magic` beschränken, siehe oben. |
 | Falsches OS startet | `docker compose exec ai-waker wget -qO- http://127.0.0.1:8080/boot.ipxe` zeigt, was die Firmware bekommt. |
 | Nach Update kein WoL | In beiden Systemen `nmcli con modify <con> 802-3-ethernet.wake-on-lan magic`. |
 
